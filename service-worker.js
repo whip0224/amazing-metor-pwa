@@ -1,4 +1,4 @@
-const CACHE_NAME = 'metro-app-cache-v1';
+const CACHE_NAME = 'metro-app-cache-v1.1';
 
 // 這裡列出「必須」在第一次打開時就下載到手機裡的檔案
 const urlsToCache = [

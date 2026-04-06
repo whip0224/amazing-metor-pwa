@@ -16,11 +16,25 @@ let currentMarker = null;
 let currentMapTarget = null; 
 
 document.addEventListener("DOMContentLoaded", () => {
+    // 1. 讀取記憶：是否有上次選過的地區？
+    const savedRegion = localStorage.getItem('metro_saved_region');
+    if (savedRegion) {
+        currentRegion = savedRegion;
+        document.getElementById("region-select").value = currentRegion;
+    }
+
+    // 2. 讀取記憶：是否有上次輸入的起點和終點？
+    const savedStart = localStorage.getItem('metro_saved_start');
+    const savedEnd = localStorage.getItem('metro_saved_end');
+    if (savedStart) document.getElementById("start-station").value = savedStart;
+    if (savedEnd) document.getElementById("end-station").value = savedEnd;
+
+    // 3. 載入資料
     loadMetroData();
-    // 【新增】監聽輸入框，手動輸入時立即關閉自動模式，確保搜尋結果刷新
+
+    // 4. 監聽輸入框
     document.getElementById("start-station").addEventListener("input", () => {
         isUsingAutoLocation = false;
-        console.log("⌨️ 手動輸入中，自動模式已關閉");
     });
 });
 
@@ -29,20 +43,31 @@ document.addEventListener("DOMContentLoaded", () => {
 // ==========================================
 function changeRegion() {
     currentRegion = document.getElementById("region-select").value;
+    
+    // 【新增記憶功能】：把選好的地區存進手機裡
+    localStorage.setItem('metro_saved_region', currentRegion);
+    
+    // 切換地區時，把儲存的舊站名清掉，避免報錯
+    localStorage.removeItem('metro_saved_start');
+    localStorage.removeItem('metro_saved_end');
+    
     document.getElementById("start-station").value = "";
     document.getElementById("end-station").value = "";
     document.getElementById("route-result").innerHTML = "";
     document.getElementById("start-nearby-results").innerHTML = "";
     document.getElementById("end-nearby-results").innerHTML = "";
+    
     userRawLocation = null;
     destinationRawLocation = null;
     nearbyStartStations = [];
     isUsingAutoLocation = false; 
     window.autoSearchPending = false;
+    
     metroStations = null;
     metroTransfers = null;
     metroGraph = {};
     document.getElementById("station-list").innerHTML = "";
+    
     loadMetroData();
 }
 
@@ -50,12 +75,29 @@ async function loadMetroData() {
     try {
         const stationRes = await fetch(`./cities/${currentRegion}/metro_station.json`);
         const transferRes = await fetch(`./cities/${currentRegion}/metro_transfer.json`);
+        
         if (!stationRes.ok || !transferRes.ok) throw new Error(`找不到檔案。`);
+        
         metroStations = await stationRes.json();
         metroTransfers = await transferRes.json();
+        
         populateStationList();
         buildGraph(); 
-    } catch (error) { console.error("載入失敗", error); }
+
+        // 🚀 【新增功能：全自動恢復路線】
+        // 當地圖資料全部建立完畢後，檢查輸入框是不是已經有剛才讀取到的記憶
+        const currentStart = document.getElementById("start-station").value.trim();
+        const currentEnd = document.getElementById("end-station").value.trim();
+        
+        // 如果起點和終點都有值，就自動幫使用者觸發一次搜尋！
+        if (currentStart && currentEnd) {
+            console.log("🔄 偵測到歷史紀錄，自動恢復路線規劃...");
+            searchRoute();
+        }
+
+    } catch (error) { 
+        console.error("載入失敗", error); 
+    }
 }
 
 function populateStationList() {
@@ -117,6 +159,10 @@ function searchRoute() {
     }
 
     if (!metroGraph[end]) return alert("找不到終點站。");
+	
+    // 【新增記憶功能】：把成功搜尋的站名存起來
+    if (manualStart) localStorage.setItem('metro_saved_start', manualStart);
+    localStorage.setItem('metro_saved_end', end);
 
     let routesToCompare = [];
 
