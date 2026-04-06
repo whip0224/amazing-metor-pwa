@@ -1,0 +1,9 @@
+{
+  "cities": [
+    { "id": "sz", "name": "深圳", "country": "CN" },
+	{ "id": "gz", "name": "廣洲", "country": "CN" },
+    { "id": "hk", "name": "香港", "country": "HK" },
+	{ "id": "twp", "name": "台北", "country": "TW" }
+	
+  ]
+}
