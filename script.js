@@ -100,19 +100,87 @@ async function loadMetroData() {
     }
 }
 
+// 新增全域變數，用來儲存當前地區的所有站名
+let allStationNames = []; 
+
 function populateStationList() {
-    const datalist = document.getElementById("station-list");
-    datalist.innerHTML = ""; 
     const allStations = new Set();
     if (metroStations && metroStations.lines) {
         metroStations.lines.forEach(line => {
             if (line.stations) line.stations.forEach(s => allStations.add(s));
         });
     }
-    allStations.forEach(s => {
-        const opt = document.createElement("option");
-        opt.value = s;
-        datalist.appendChild(opt);
+    allStationNames = Array.from(allStations);
+    
+    // 啟動我們自製的跨平台完美下拉選單
+    setupCustomAutocomplete("start-station");
+    setupCustomAutocomplete("end-station");
+}
+
+function setupCustomAutocomplete(inputId) {
+    const inp = document.getElementById(inputId);
+    if (!inp) return;
+
+    // 1. 移除萬惡的 HTML5 原生 datalist (解決 iOS 衝突)
+    inp.removeAttribute("list");
+    inp.setAttribute("autocomplete", "off");
+
+    // 2. 建立選單的容器並確保排版正確
+    let listContainer = document.getElementById(inputId + "-autocomplete-list");
+    if (!listContainer) {
+        // 包裝 input 以便下拉選單能精準黏在它下面
+        const wrapper = document.createElement("div");
+        wrapper.style.position = "relative";
+        wrapper.style.width = "100%";
+        inp.parentNode.insertBefore(wrapper, inp);
+        wrapper.appendChild(inp);
+
+        listContainer = document.createElement("div");
+        listContainer.setAttribute("id", inputId + "-autocomplete-list");
+        listContainer.setAttribute("class", "autocomplete-items");
+        wrapper.appendChild(listContainer);
+    }
+
+    // 3. 監聽使用者的打字事件
+    inp.addEventListener("input", function() {
+        let val = this.value.trim();
+        listContainer.innerHTML = ""; // 每次打字先清空舊選單
+        
+        // 保留我們之前的自動模式關閉邏輯
+        if (inputId === 'start-station') {
+            isUsingAutoLocation = false;
+        }
+
+        if (!val) return false; // 沒打字就不顯示
+
+        // 過濾並產生選項 (包含該字串的車站都會列出)
+        let matches = allStationNames.filter(station => station.includes(val));
+        
+        matches.forEach(station => {
+            let item = document.createElement("div");
+            
+            // 將匹配的文字加粗變色，增加 App 質感
+            const regex = new RegExp(`(${val})`, "gi");
+            item.innerHTML = station.replace(regex, "<strong>$1</strong>");
+            
+            // 點擊選項後的動作
+            item.addEventListener("click", function() {
+                inp.value = station; // 把站名填入輸入框
+                listContainer.innerHTML = ""; // 關閉選單
+                
+                // 如果有點選過推薦結果，就清空下方的距離提示
+                const nearbyDiv = document.getElementById(inputId.replace('-station', '-nearby-results'));
+                if(nearbyDiv) nearbyDiv.innerHTML = '';
+            });
+            listContainer.appendChild(item);
+        });
+    });
+
+    // 4. 點擊畫面其他空白處時，自動關閉選單
+    document.addEventListener("click", function (e) {
+        if (e.target !== inp) {
+            listContainer.innerHTML = "";
+        }
     });
 }
 
