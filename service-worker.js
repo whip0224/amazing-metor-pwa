@@ -1,5 +1,5 @@
-const CACHE_NAME = 'metro-app-cache-v1.1';
-
+const CACHE_NAME = 'metro-app-cache-v1.2';
+// 修正iphone 車站顯示問題,修正日期20260426
 // 這裡列出「必須」在第一次打開時就下載到手機裡的檔案
 const urlsToCache = [
   './index.html',
