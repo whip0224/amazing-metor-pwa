@@ -1,0 +1,24 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "PingFang HK", "Microsoft JhengHei", sans-serif;
+  }
+
+  .font-mono-tabular {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom Leaflet dark mode adjustments */
+.dark .leaflet-tile-pane {
+  filter: brightness(0.88) contrast(1.08) saturate(0.9);
+}
+
+.leaflet-container {
+  font-family: inherit;
+  z-index: 10;
+}

@@ -1,0 +1,7 @@
+{
+  "name": "地鐵極速導航",
+  "description": "支援全離線運算與多起點優化的專業地鐵導航 App",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
