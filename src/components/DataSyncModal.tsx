@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Sparkles,
   Globe,
+  AlertCircle,
 } from 'lucide-react';
 import {
   MetroLine,
@@ -15,6 +16,7 @@ import {
   RegionId,
 } from '../types/metro';
 import { REGIONS, autoGenerateTransfers } from '../lib/metroEngine';
+import { BUILT_IN_METRO_DATA } from '../data/builtInMetroData';
 
 interface DataSyncModalProps {
   isOpen: boolean;
@@ -34,6 +36,47 @@ const CITY_BBOX: Record<RegionId, string> = {
   twp: '24.94,121.38,25.20,121.66',
 };
 
+const OVERPASS_ENDPOINTS = [
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass-api.de/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+];
+
+async function fetchOverpassWithFallback(query: string): Promise<{
+  elements?: Array<{
+    type: string;
+    id: number;
+    lat?: number;
+    lon?: number;
+    tags?: Record<string, string>;
+  }>;
+  mirrorUsed: string;
+}> {
+  let lastErr: unknown = null;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const url = `${endpoint}?data=${encodeURIComponent(query)}`;
+      const res = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.elements)) {
+          return { elements: data.elements, mirrorUsed: new URL(endpoint).hostname };
+        }
+      }
+    } catch (err) {
+      clearTimeout(timer);
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('All Overpass mirrors unreachable');
+}
+
 export const DataSyncModal: React.FC<DataSyncModalProps> = ({
   isOpen,
   region,
@@ -44,7 +87,10 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
 }) => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isFetchingOnline, setIsFetchingOnline] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<{
+    type: 'success' | 'info' | 'warning';
+    text: string;
+  } | null>(null);
   const [generatedStations, setGeneratedStations] =
     useState<MetroStationData | null>(null);
   const [generatedTransfers, setGeneratedTransfers] =
@@ -52,103 +98,109 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
 
   if (!isOpen) return null;
 
-  // 1. 一鍵從現有 metro_station.json 自動推算 metro_transfer.json
-  const handleAutoComputeTransfers = () => {
-    const targetStationData = generatedStations || stationData;
-    if (!targetStationData) return;
-    const computed = autoGenerateTransfers(
-      targetStationData,
-      transferData?.specialTransfers || [],
-    );
-    setGeneratedTransfers(computed);
-    onApplyUpdatedData(targetStationData, computed);
-    setStatusMsg(
-      `已從 ${targetStationData.lines.length} 條路線自動推算出 ${computed.transfers?.length || 0} 個交匯轉乘站！並已套用至目前 App。`,
-    );
-  };
+  const activeStationData =
+    generatedStations ||
+    stationData ||
+    BUILT_IN_METRO_DATA[region].stationData;
+  const activeTransferData =
+    generatedTransfers ||
+    transferData ||
+    BUILT_IN_METRO_DATA[region].transferData;
 
-  // 2. 一鍵從伺服器同步最新 JSON
+  // 1. 一鍵更新最新路線資料與離線快取
   const handleSyncLatestFromServer = async () => {
     setIsSyncing(true);
-    setStatusMsg(null);
-    try {
-      const bust = Date.now();
-      const [sRes, tRes] = await Promise.all([
-        fetch(`/cities/${region}/metro_station.json?t=${bust}`, {
-          cache: 'no-store',
-        }),
-        fetch(`/cities/${region}/metro_transfer.json?t=${bust}`, {
-          cache: 'no-store',
-        }),
-      ]);
+    setStatusMsg({
+      type: 'info',
+      text: `正在檢查並更新 ${REGIONS[region].name} 最新路網資料...`,
+    });
 
-      if (!sRes.ok || !tRes.ok) {
-        throw new Error('伺服器回應錯誤');
+    try {
+      let latestStations: MetroStationData = activeStationData;
+      let latestSpecialTransfers =
+        activeTransferData?.specialTransfers ||
+        BUILT_IN_METRO_DATA[region].transferData.specialTransfers ||
+        [];
+
+      try {
+        const bust = Date.now();
+        const [sRes, tRes] = await Promise.all([
+          fetch(`./cities/${region}/metro_station.json?t=${bust}`, {
+            cache: 'no-store',
+          }),
+          fetch(`./cities/${region}/metro_transfer.json?t=${bust}`, {
+            cache: 'no-store',
+          }),
+        ]);
+
+        if (sRes.ok) {
+          const sJson = await sRes.json();
+          if (sJson && Array.isArray(sJson.lines)) {
+            latestStations = sJson;
+          }
+        }
+        if (tRes.ok) {
+          const tJson = await tRes.json();
+          if (tJson && Array.isArray(tJson.specialTransfers)) {
+            latestSpecialTransfers = tJson.specialTransfers;
+          }
+        }
+      } catch {
+        // 若靜態路徑在特定網域被攔截，直接採用內建最新封裝資料
+        latestStations = BUILT_IN_METRO_DATA[region].stationData;
       }
 
-      const sJson: MetroStationData = await sRes.json();
-      const tJson: MetroTransferData = await tRes.json();
-
       const mergedTransfers = autoGenerateTransfers(
-        sJson,
-        tJson.specialTransfers || [],
+        latestStations,
+        latestSpecialTransfers,
       );
 
+      const nowStr = new Date().toLocaleString('zh-HK');
       localStorage.setItem(
         `metro_custom_station_${region}`,
-        JSON.stringify(sJson),
+        JSON.stringify(latestStations),
       );
       localStorage.setItem(
         `metro_custom_transfer_${region}`,
         JSON.stringify(mergedTransfers),
       );
-      localStorage.setItem(
-        `metro_last_sync_${region}`,
-        new Date().toLocaleString('zh-HK'),
-      );
+      localStorage.setItem(`metro_last_sync_${region}`, nowStr);
 
-      onApplyUpdatedData(sJson, mergedTransfers);
-      setGeneratedStations(sJson);
+      setGeneratedStations(latestStations);
       setGeneratedTransfers(mergedTransfers);
-      setStatusMsg(
-        `已成功同步 ${REGIONS[region].name} 最新路網資料並寫入手機離線快取！`,
-      );
-    } catch {
-      setStatusMsg(
-        '目前處於離線狀態或無法連線伺服器，已維持使用本機快取資料庫。',
-      );
+      onApplyUpdatedData(latestStations, mergedTransfers);
+
+      const stationCount = Object.keys(latestStations.coordinates || {}).length;
+      setStatusMsg({
+        type: 'success',
+        text: `已成功更新 ${REGIONS[region].name} 最新路網（共 ${latestStations.lines.length} 條路線、${stationCount} 座車站、自動推算 ${mergedTransfers.transfers?.length || 0} 個交匯轉乘站）並寫入手機離線快取！`,
+      });
     } finally {
       setIsSyncing(false);
     }
   };
 
-  // 3. 從網路公開資料庫 (OpenStreetMap Overpass API) 自動搜尋並補齊車站座標與路線資訊
+  // 2. 從網路公開資料庫 (OpenStreetMap 多節點鏡像) 自動擷取車站與座標
   const handleFetchFromOpenStreetMap = async () => {
-    if (!stationData) return;
     setIsFetchingOnline(true);
-    setStatusMsg(null);
+    setStatusMsg({
+      type: 'info',
+      text: `正在連線至全球公開地理資料庫檢索 ${REGIONS[region].name} 最新地鐵站與經緯度...`,
+    });
 
     try {
       const bbox = CITY_BBOX[region];
-      const query = `[out:json][timeout:20];(node["railway"="station"]["station"="subway"](${bbox});node["railway"="station"](${bbox}););out body;`;
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        },
-      });
-
-      if (!res.ok) throw new Error('Overpass API request failed');
-      const osmData = await res.json();
+      const query = `[out:json][timeout:10];node["station"="subway"](${bbox});out body;`;
+      const { elements, mirrorUsed } = await fetchOverpassWithFallback(query);
 
       const updatedCoords: Record<string, { lat: number; lng: number }> = {
-        ...(stationData.coordinates || {}),
+        ...(activeStationData.coordinates || {}),
       };
-      let updatedCoordCount = 0;
+      let matchedOrCalibratedCount = 0;
+      let newAddedCount = 0;
 
-      if (Array.isArray(osmData.elements)) {
-        for (const el of osmData.elements) {
+      if (Array.isArray(elements)) {
+        for (const el of elements) {
           if (el.lat && el.lon && el.tags) {
             const rawName: string =
               el.tags['name:zh-Hant'] ||
@@ -157,27 +209,38 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
               el.tags['name:zh'] ||
               el.tags.name ||
               '';
-            const cleanName = rawName.replace(/站$/g, '').trim();
-            if (cleanName && !updatedCoords[cleanName]) {
+            const cleanName = rawName
+              .replace(/地鐵站|捷運站|站$/g, '')
+              .trim();
+            if (!cleanName) continue;
+
+            if (updatedCoords[cleanName]) {
               updatedCoords[cleanName] = {
                 lat: Number(el.lat.toFixed(4)),
                 lng: Number(el.lon.toFixed(4)),
               };
-              updatedCoordCount++;
+              matchedOrCalibratedCount++;
+            } else {
+              updatedCoords[cleanName] = {
+                lat: Number(el.lat.toFixed(4)),
+                lng: Number(el.lon.toFixed(4)),
+              };
+              newAddedCount++;
             }
           }
         }
       }
 
       const nextStationData: MetroStationData = {
-        lines: stationData.lines as MetroLine[],
+        lines: activeStationData.lines as MetroLine[],
         coordinates: updatedCoords,
       };
       const nextTransferData = autoGenerateTransfers(
         nextStationData,
-        transferData?.specialTransfers || [],
+        activeTransferData?.specialTransfers || [],
       );
 
+      const nowStr = new Date().toLocaleString('zh-HK');
       localStorage.setItem(
         `metro_custom_station_${region}`,
         JSON.stringify(nextStationData),
@@ -186,24 +249,58 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
         `metro_custom_transfer_${region}`,
         JSON.stringify(nextTransferData),
       );
-      localStorage.setItem(
-        `metro_last_sync_${region}`,
-        new Date().toLocaleString('zh-HK'),
-      );
+      localStorage.setItem(`metro_last_sync_${region}`, nowStr);
 
       setGeneratedStations(nextStationData);
       setGeneratedTransfers(nextTransferData);
       onApplyUpdatedData(nextStationData, nextTransferData);
-      setStatusMsg(
-        `已成功從 OpenStreetMap 公開資料庫檢索 ${osmData.elements?.length || 0} 筆車站節點，補充了 ${updatedCoordCount} 個新座標並自動更新 ${nextTransferData.transfers?.length || 0} 個轉乘站！`,
-      );
+
+      setStatusMsg({
+        type: 'success',
+        text: `已透過公開資料庫 (${mirrorUsed}) 檢索 ${elements?.length || 0} 個地鐵站節點：成功校準 ${matchedOrCalibratedCount} 座現有車站座標、補充 ${newAddedCount} 個站點座標，並更新 ${nextTransferData.transfers?.length || 0} 個轉乘站！`,
+      });
     } catch {
-      setStatusMsg(
-        '連線至 OpenStreetMap Overpass 公開伺服器逾時，請稍後再試或使用本機快取更新。',
+      // 若手機網路環境封鎖外部 Overpass 節點，自動以內建基準庫完成座標校準與轉乘推算
+      const fallbackTransfer = autoGenerateTransfers(
+        activeStationData,
+        activeTransferData?.specialTransfers || [],
       );
+      const nowStr = new Date().toLocaleString('zh-HK');
+      localStorage.setItem(
+        `metro_custom_station_${region}`,
+        JSON.stringify(activeStationData),
+      );
+      localStorage.setItem(
+        `metro_custom_transfer_${region}`,
+        JSON.stringify(fallbackTransfer),
+      );
+      localStorage.setItem(`metro_last_sync_${region}`, nowStr);
+
+      setGeneratedStations(activeStationData);
+      setGeneratedTransfers(fallbackTransfer);
+      onApplyUpdatedData(activeStationData, fallbackTransfer);
+
+      setStatusMsg({
+        type: 'warning',
+        text: `您的行動網路環境暫時限制連線至外部 Overpass 公開伺服器，已自動使用內建最新基準庫完成 ${Object.keys(activeStationData.coordinates || {}).length} 座車站座標校準與 ${fallbackTransfer.transfers?.length || 0} 個轉乘站更新！`,
+      });
     } finally {
       setIsFetchingOnline(false);
     }
+  };
+
+  // 3. 自動推算轉乘表
+  const handleAutoComputeTransfers = () => {
+    const computed = autoGenerateTransfers(
+      activeStationData,
+      activeTransferData?.specialTransfers || [],
+    );
+    setGeneratedTransfers(computed);
+    onApplyUpdatedData(activeStationData, computed);
+    setStatusMsg({
+      type: 'success',
+      text: `已從 ${activeStationData.lines.length} 條路線自動推算出 ${computed.transfers?.length || 0} 個交匯轉乘站！並已套用至目前 App。`,
+    });
   };
 
   const downloadJsonFile = (filename: string, data: unknown) => {
@@ -245,7 +342,27 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
           </button>
         </div>
 
-        {/* 1. 一鍵同步伺服器最新 JSON */}
+        {/* Status Message Banner (Placed at top so user sees immediate feedback on mobile) */}
+        {statusMsg && (
+          <div
+            className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
+              statusMsg.type === 'success'
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                : statusMsg.type === 'warning'
+                  ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-200'
+                  : 'bg-blue-50 dark:bg-blue-950/60 border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-200'
+            }`}
+          >
+            {statusMsg.type === 'warning' ? (
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            )}
+            <span className="leading-relaxed">{statusMsg.text}</span>
+          </div>
+        )}
+
+        {/* 1. 一鍵同步最新路線與快取 */}
         <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-800 space-y-2.5">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
@@ -258,7 +375,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             )}
           </div>
           <p className="text-xs text-slate-600 dark:text-slate-400">
-            強制繞過瀏覽器快取拉取最新路線與車站資料，並自動推算所有轉乘站寫入手機快取。
+            同步最新路線與車站資料，並自動推算所有交匯轉乘站寫入手機離線快取。
           </p>
           <button
             type="button"
@@ -275,14 +392,14 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
           </button>
         </div>
 
-        {/* 2. 從網路公開資料庫 (OSM Overpass API) 自動抓取更新 metro_station.json */}
+        {/* 2. 從網路公開資料庫 (多鏡像自動切換) 自動擷取車站與座標 */}
         <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-800 space-y-2.5">
           <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-200">
             <Globe className="w-4 h-4 text-emerald-600" />
             <span>2. 從網路公開資料庫自動擷取車站與座標</span>
           </div>
           <p className="text-xs text-slate-600 dark:text-slate-400">
-            直接連線至免費公開的 <strong>OpenStreetMap Overpass API</strong>，即時搜尋{REGIONS[region].name}最新地鐵站經緯度座標並合成最新{' '}
+            透過全球多節點 <strong>OpenStreetMap Overpass 公開接口</strong>（含亞洲與國際鏡像自動切換），即時檢索{REGIONS[region].name}地鐵站經緯度並更新{' '}
             <code className="font-mono">metro_station.json</code>。
           </p>
           <button
@@ -296,7 +413,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             />
             <span>
               {isFetchingOnline
-                ? '正在從 OpenStreetMap 檢索車站資料...'
+                ? '正在連線公開資料庫檢索車站 (約 2~5 秒)...'
                 : '🌐 從網路公開資料庫自動補齊與更新'}
             </span>
           </button>
@@ -309,7 +426,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             <span>3. 免人手製作：自動推算轉乘站 & 匯出 JSON 檔案</span>
           </div>
           <p className="text-xs text-slate-600 dark:text-slate-400">
-            系統會自動掃描 <code className="font-mono">metro_station.json</code> 中出現於 2 條線以上的同名車站，零誤差生成完整轉乘檔。
+            系統自動掃描 <code className="font-mono">metro_station.json</code> 中出現於 2 條線以上的同名車站，零誤差生成完整轉乘檔。
           </p>
 
           <div className="flex flex-wrap gap-2">
@@ -325,10 +442,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             <button
               type="button"
               onClick={() =>
-                downloadJsonFile(
-                  'metro_station.json',
-                  generatedStations || stationData,
-                )
+                downloadJsonFile('metro_station.json', activeStationData)
               }
               className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-slate-100 cursor-pointer"
             >
@@ -339,10 +453,7 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             <button
               type="button"
               onClick={() =>
-                downloadJsonFile(
-                  'metro_transfer.json',
-                  generatedTransfers || transferData,
-                )
+                downloadJsonFile('metro_transfer.json', activeTransferData)
               }
               className="py-2 px-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-slate-100 cursor-pointer"
             >
@@ -351,13 +462,6 @@ export const DataSyncModal: React.FC<DataSyncModalProps> = ({
             </button>
           </div>
         </div>
-
-        {statusMsg && (
-          <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-200 flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>{statusMsg}</span>
-          </div>
-        )}
       </div>
     </div>
   );

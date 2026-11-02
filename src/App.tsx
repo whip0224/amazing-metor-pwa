@@ -38,6 +38,7 @@ import { StationSelectorModal } from './components/StationSelectorModal';
 import { RouteCard } from './components/RouteCard';
 import { InteractiveMetroMap } from './components/InteractiveMetroMap';
 import { DataSyncModal } from './components/DataSyncModal';
+import { BUILT_IN_METRO_DATA } from './data/builtInMetroData';
 
 export function App() {
   // Theme State
@@ -62,11 +63,13 @@ export function App() {
     return saved && REGIONS[saved] ? saved : 'sz';
   });
 
-  const [stationData, setStationData] = useState<MetroStationData | null>(null);
-  const [transferData, setTransferData] = useState<MetroTransferData | null>(
-    null,
+  const [stationData, setStationData] = useState<MetroStationData | null>(
+    () => BUILT_IN_METRO_DATA[region].stationData,
   );
-  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  const [transferData, setTransferData] = useState<MetroTransferData | null>(
+    () => BUILT_IN_METRO_DATA[region].transferData,
+  );
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(false);
 
   // Inputs & Preferences
   const [startStation, setStartStation] = useState<string>(
@@ -154,44 +157,59 @@ export function App() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Load Region JSON Files (checks localStorage custom synced version first, then static precached JSON)
+  // Load Region Data (immediately uses built-in or localStorage custom synced version, and refreshes from ./cities/ in background)
   useEffect(() => {
     let active = true;
-    setIsLoadingData(true);
     setFeedbackMessage(null);
 
+    // 1. 先立即載入本機已同步版本或內建版本，確保 0 延遲、永不失敗
+    const cachedS = localStorage.getItem(`metro_custom_station_${region}`);
+    const cachedT = localStorage.getItem(`metro_custom_transfer_${region}`);
+    if (cachedS) {
+      try {
+        const parsedS = JSON.parse(cachedS) as MetroStationData;
+        const parsedT = cachedT
+          ? (JSON.parse(cachedT) as MetroTransferData)
+          : autoGenerateTransfers(
+              parsedS,
+              BUILT_IN_METRO_DATA[region].transferData.specialTransfers || [],
+            );
+        setStationData(parsedS);
+        setTransferData(parsedT);
+      } catch {
+        setStationData(BUILT_IN_METRO_DATA[region].stationData);
+        setTransferData(BUILT_IN_METRO_DATA[region].transferData);
+      }
+    } else {
+      setStationData(BUILT_IN_METRO_DATA[region].stationData);
+      setTransferData(BUILT_IN_METRO_DATA[region].transferData);
+    }
+
+    // 2. 背景靜默檢查 ./cities/ JSON
     Promise.all([
-      fetch(`/cities/${region}/metro_station.json`).then((r) => {
+      fetch(`./cities/${region}/metro_station.json`).then((r) => {
         if (!r.ok) throw new Error('Failed to load station data');
         return r.json();
       }),
-      fetch(`/cities/${region}/metro_transfer.json`).then((r) => {
+      fetch(`./cities/${region}/metro_transfer.json`).then((r) => {
         if (!r.ok) throw new Error('Failed to load transfer data');
         return r.json();
       }),
     ])
       .then(([sData, tData]: [MetroStationData, MetroTransferData]) => {
-        if (!active) return;
-        const autoTransfers = autoGenerateTransfers(
-          sData,
-          tData.specialTransfers || [],
-        );
-        setStationData(sData);
-        setTransferData(autoTransfers);
+        if (!active || !sData?.lines) return;
+        if (!localStorage.getItem(`metro_custom_station_${region}`)) {
+          const autoTransfers = autoGenerateTransfers(
+            sData,
+            tData.specialTransfers || [],
+          );
+          setStationData(sData);
+          setTransferData(autoTransfers);
+        }
         setIsLoadingData(false);
       })
       .catch(() => {
         if (!active) return;
-        // Fallback to localStorage custom cache if available
-        const cachedS = localStorage.getItem(`metro_custom_station_${region}`);
-        const cachedT = localStorage.getItem(`metro_custom_transfer_${region}`);
-        if (cachedS) {
-          setStationData(JSON.parse(cachedS));
-          if (cachedT) setTransferData(JSON.parse(cachedT));
-          setIsLoadingData(false);
-          return;
-        }
-        setFeedbackMessage('無法載入該地區的路網資料，請檢查網路或快取狀態。');
         setIsLoadingData(false);
       });
 
